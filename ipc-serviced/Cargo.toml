@@ -1,0 +1,8 @@
+[package]
+name = "ipc-serviced"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde = { version = "1.0.200", features = ["derive"] }
+linux-ipc = "0.2.1"
