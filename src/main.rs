@@ -6,7 +6,7 @@ mod service;
 fn main() -> ! {
     let userspace_config = config::read();
 
-    fs::create_dir("/tmp/ipc").expect("Failed to create /tmp/ipc/serviced");
+    fs::create_dir_all("/tmp/ipc/serviced").expect("Failed to create /tmp/ipc/serviced");
     let manager = service::Manager::new(userspace_config.serviced_path);
 
     manager.load_all();

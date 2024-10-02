@@ -82,7 +82,6 @@ pub struct Config {
 }
 
 pub struct Manager {
-    services_path: PathBuf,
     pub service_groups: Vec<Vec<Service>>,
 }
 
@@ -99,10 +98,7 @@ impl Manager {
             .map(|service_config| service_config.service)
             .collect::<Vec<_>>();
 
-        Self {
-            services_path,
-            service_groups,
-        }
+        Self { service_groups }
     }
 
     pub fn load_all(&self) {
@@ -117,7 +113,9 @@ impl Manager {
                     if program.exists() { "exists" } else { "does not exist" }
                 );
 
-                Command::from(&service.exec).spawn().expect("uh oh");
+                if let Err(err) = Command::from(&service.exec).spawn() {
+                    eprintln!("Service \"{}\" failed to start: {:#?}", service.id, err);
+                }
             }
         }
     }
