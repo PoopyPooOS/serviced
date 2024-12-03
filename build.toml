@@ -1,1 +1,1 @@
-out = "/sbin/serviced"
+out = "/system/bin/serviced"

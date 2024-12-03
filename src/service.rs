@@ -1,122 +1,150 @@
-use serde::Deserialize;
-use std::{
-    collections::HashMap,
-    fs,
-    path::PathBuf,
-    process::{Command, Stdio},
+use crate::{
+    config::Services,
+    sort::sort_services,
+    types::{Service, Status},
+    util::until,
 };
-
-use crate::service;
-
-#[derive(Debug, Deserialize)]
-pub struct Service {
-    pub name: String,
-    pub id: String,
-    pub exec: Exec,
-    #[serde(default = "default_enabled")]
-    pub enabled: bool,
-    #[serde(default)]
-    pub dependencies: Vec<String>,
-    #[serde(default)]
-    pub io: Vec<IoOption>,
-    #[serde(skip)]
-    pub status: Status,
-    #[serde(skip)]
-    pub pid: Option<u32>,
-}
-
-fn default_enabled() -> bool {
-    true
-}
-
-#[derive(Debug, Deserialize)]
-pub struct Exec(pub String);
-
-impl From<&Exec> for Command {
-    fn from(val: &Exec) -> Self {
-        let parts = val.0.split_whitespace();
-        let mut env = HashMap::new();
-        let mut program = String::new();
-        let mut args = Vec::new();
-
-        for part in parts {
-            if part.contains('=') {
-                let mut kv = part.splitn(2, '=');
-                let key = kv.next().unwrap().to_string();
-                let value = kv.next().unwrap().to_string();
-                env.insert(key, value);
-            } else if program.is_empty() {
-                program = part.to_string();
-            } else {
-                args.push(part.to_string());
-            }
-        }
-
-        let mut command = Command::new(program);
-        command.envs(env);
-        command.args(args);
-
-        command
-    }
-}
-
-#[derive(Debug, Deserialize)]
-pub enum IoOption {
-    Out,
-    In,
-    Err,
-}
-
-#[derive(Debug, Deserialize, PartialEq, Default)]
-pub enum Status {
-    Stopping,
-    #[default]
-    Stopped,
-    Starting,
-    Running,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct Config {
-    pub service: Vec<Service>,
-}
+use futures::stream::StreamExt;
+use logger::{error, info, make_fatal, Log};
+use nix::{
+    sys::signal::{kill, Signal::SIGTERM},
+    unistd::Pid,
+};
+use signal_hook::{consts::signal::SIGUSR1, iterator::exfiltrator::WithOrigin};
+use signal_hook_tokio::SignalsInfo;
+use std::{
+    process::{self, Command},
+    sync::Arc,
+    thread,
+    time::Duration,
+};
+use tokio::sync::Mutex;
 
 pub struct Manager {
-    pub service_groups: Vec<Vec<Service>>,
+    pub services: Arc<Mutex<Vec<Service>>>,
 }
 
 impl Manager {
-    pub fn new(services_path: PathBuf) -> Self {
-        assert!(services_path.exists(), "Services config not found");
+    pub fn new(services: Services) -> Result<Self, Box<Log>> {
+        let mut services = services
+            .into_iter()
+            .map(|(service_id, mut service)| {
+                service.id = service_id;
+                service
+            })
+            .collect::<Vec<Service>>();
 
-        let service_groups = fs::read_dir(&services_path)
-            .expect("Failed to read service group configs")
-            .filter_map(Result::ok)
-            .filter(|file| file.path().extension().map_or(false, |ext| ext == "toml"))
-            .map(|file| fs::read_to_string(file.path()).expect("Failed to read service file"))
-            .map(|raw| toml::from_str::<service::Config>(&raw).expect("Failed to parse service file"))
-            .map(|service_config| service_config.service)
-            .collect::<Vec<_>>();
+        services = match sort_services(&services) {
+            Ok(services) => services,
+            Err(err) => {
+                return Err(Box::new(make_fatal!(format!("Failed to sort services for services: {:#?}.", err))));
+            }
+        };
 
-        Self { service_groups }
+        Ok(Self {
+            services: Arc::new(Mutex::new(services)),
+        })
     }
 
-    pub fn load_all(&self) {
-        for group in &self.service_groups {
-            for service in group {
-                let program = PathBuf::from(&service.exec.0);
+    pub async fn start(&self) -> ! {
+        info!("Starting signal handler thread");
+        let mut signals = SignalsInfo::<WithOrigin>::new([SIGUSR1]).expect("Failed to create signal handler");
 
-                println!("Loading {}", program.display());
-                println!(
-                    "{} {}",
-                    program.display(),
-                    if program.exists() { "exists" } else { "does not exist" }
-                );
-
-                if let Err(err) = Command::from(&service.exec).spawn() {
-                    eprintln!("Service \"{}\" failed to start: {:#?}", service.id, err);
+        let services_clone = Arc::clone(&self.services);
+        tokio::spawn(async move {
+            info!("Signal handler thread started");
+            while let Some(origin) = signals.next().await {
+                match origin.signal {
+                    SIGUSR1 => {
+                        if let Some(process) = origin.process {
+                            let mut services = services_clone.lock().await;
+                            for service in &mut services.iter_mut() {
+                                if service.pid == Some(process.pid) && service.status == Status::Starting {
+                                    info!(format!("{} is ready.", service));
+                                    service.status = Status::Running;
+                                }
+                            }
+                        }
+                    }
+                    other => unreachable!("The signal '{other}' is not captured."),
                 }
             }
+        });
+
+        let mut services = self.services.lock().await.clone();
+
+        for service in &mut services.iter_mut() {
+            if !service.enabled || service.status != Status::Stopped {
+                continue;
+            }
+
+            self.start_service(service).await;
+        }
+
+        loop {
+            thread::sleep(Duration::from_secs(u64::MAX));
+        }
+    }
+
+    #[allow(clippy::cast_possible_wrap)]
+    async fn start_service(&self, service: &mut Service) {
+        info!(format!("Starting {}.", service));
+        service.status = Status::Starting;
+
+        let services = &self.services.lock().await;
+
+        let mut dependencies = services
+            .iter()
+            .filter(|s| service.dependencies.contains(&s.id) && (s.status == Status::Running || s.status == Status::Stopped))
+            .collect::<Vec<&Service>>();
+
+        for service in &mut dependencies {
+            if service.status != Status::Stopped || service.status != Status::Running {
+                continue;
+            }
+
+            until(|| service.status == Status::Running, Duration::from_millis(25)).await;
+        }
+
+        let mut command = Command::from(&service.exec);
+        let mut child = command.spawn().unwrap_or_else(|err| {
+            error!(format!("Failed to start service \"{}\": {:#?}.", service.id, err));
+            process::exit(1)
+        });
+
+        service.pid = Some(child.id() as i32);
+
+        let service = service.clone();
+        tokio::spawn(async move {
+            let child_exit_status = child.wait().unwrap_or_else(|err| {
+                error!(format!("Failed to wait for service \"{}\": {:#?}.", service.id, err));
+                process::exit(1)
+            });
+
+            if !child_exit_status.success() {
+                error!(format!(
+                    "Service \"{}\" exited with non-zero status: {:#?}.",
+                    service.id, child_exit_status
+                ));
+                process::exit(1)
+            }
+        });
+    }
+
+    #[allow(dead_code, reason = "Will be used in the future")]
+    fn stop_service(&self, service: &mut Service) -> Result<(), Box<Log>> {
+        info!(format!("Stopping {}.", service));
+        service.status = Status::Stopping;
+
+        if let Some(pid) = service.pid {
+            kill(Pid::from_raw(pid), SIGTERM).map_err(|err| {
+                Box::new(make_fatal!(format!(
+                    "Failed to send SIGTERM to service \"{}\": {:#?}.",
+                    service.id, err
+                )))
+            })
+        } else {
+            Err(Box::new(make_fatal!(format!("Service \"{}\" is not running.", service.id))))
         }
     }
 }

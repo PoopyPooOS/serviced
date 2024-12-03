@@ -1,21 +1,34 @@
-use std::{fs, thread, time::Duration};
+#![allow(clippy::unused_self)]
+
+use logger::fatal;
+use std::{env, process};
+use tokio::fs;
 
 mod config;
 mod service;
+mod sort;
+mod types;
+mod util;
 
-fn main() -> ! {
-    let userspace_config = config::read();
+#[tokio::main]
+async fn main() -> ! {
+    logger::set_app_name!();
+    env::set_var("SERVICED_PID", process::id().to_string());
 
-    fs::create_dir_all("/tmp/ipc/serviced").expect("Failed to create /tmp/ipc/serviced");
-    let manager = service::Manager::new(userspace_config.serviced_path);
+    let config = config::read().unwrap_or_else(|err| {
+        err.output();
+        process::exit(1);
+    });
 
-    manager.load_all();
+    fs::create_dir_all("/tmp/ipc/services").await.unwrap_or_else(|err| {
+        fatal!(format!("Failed to create service IPC directory: {:#?}.", err));
+        process::exit(1);
+    });
 
-    infinite_loop()
-}
+    let manager = service::Manager::new(config.services).unwrap_or_else(|err| {
+        err.output();
+        process::exit(1);
+    });
 
-pub fn infinite_loop() -> ! {
-    loop {
-        thread::sleep(Duration::from_secs(u64::MAX));
-    }
+    manager.start().await;
 }
