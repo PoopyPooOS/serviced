@@ -47,12 +47,10 @@ impl Manager {
     }
 
     pub async fn start(&self) -> ! {
-        info!("Starting signal handler thread");
         let mut signals = SignalsInfo::<WithOrigin>::new([SIGUSR1]).expect("Failed to create signal handler");
 
         let services_clone = Arc::clone(&self.services);
         tokio::spawn(async move {
-            info!("Signal handler thread started");
             while let Some(origin) = signals.next().await {
                 match origin.signal {
                     SIGUSR1 => {
