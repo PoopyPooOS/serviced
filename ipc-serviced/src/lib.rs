@@ -8,13 +8,14 @@ pub fn get_pid() -> Result<Pid, Box<Log>> {
     let raw_pid = env::var("SERVICED_PID")
         .map_err(|_| {
             Box::new(make_fatal!(
-                "SERVICED_PID environment variable not set, was this launched manually?"
+                hint: "Make sure that serviced starts this process."
+                "SERVICED_PID environment variable not set"
             ))
         })?
         .parse::<i32>()
         .map_err(|_| {
             Box::new(make_fatal!(
-                "SERVICED_PID environment variable is not a non-zero integer"
+                "SERVICED_PID environment variable is not an integer integer"
             ))
         })?;
 
