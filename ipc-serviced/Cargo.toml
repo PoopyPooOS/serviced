@@ -1,0 +1,13 @@
+[package]
+name = "ipc-serviced"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = ["panic"]
+panic = []
+
+[dependencies]
+rustix = { workspace = true, features = ["process"] }
+
+logger = { workspace = true }

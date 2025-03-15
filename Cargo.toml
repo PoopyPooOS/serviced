@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 serde = { workspace = true }
-ipc = { workspace = true }
+serde-inline-default = { workspace = true }
 
 rustix = { workspace = true, features = ["process"] }
 
@@ -14,5 +14,6 @@ futures = { workspace = true }
 signal-hook = { workspace = true }
 signal-hook-tokio = { workspace = true }
 
-tl = { workspace = true }
 logger = { workspace = true }
+ipc = { workspace = true }
+tl = { workspace = true }

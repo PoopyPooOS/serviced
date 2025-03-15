@@ -1,27 +1,26 @@
 use serde::Deserialize;
+use serde_inline_default::serde_inline_default;
 use std::{collections::HashMap, fmt::Display, process::Command};
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
+#[serde_inline_default]
 pub struct Service {
     pub name: String,
     #[serde(skip)]
     pub id: String,
     pub exec: Exec,
-    #[serde(default = "default_enabled")]
+    #[serde_inline_default(true)]
     pub enabled: bool,
     #[serde(default)]
     pub dependencies: Vec<String>,
+    // TODO: Use this.
     #[serde(default)]
+    #[allow(dead_code)]
     pub io: Vec<IoOption>,
     #[serde(skip)]
     pub status: Status,
     #[serde(skip)]
     pub pid: Option<i32>,
-}
-
-fn default_enabled() -> bool {
-    true
 }
 
 impl Display for Service {
